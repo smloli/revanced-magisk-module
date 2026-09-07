@@ -17,41 +17,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout local branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: true
 
-      # 1. 自动同步上游仓库 (j-hc/revanced-magisk-module)
-      - name: Sync upstream changes
-        id: sync
-        uses: aitemr/upstream-repo-sync@v1
-        with:
-          upstream_repository: 'j-hc/revanced-magisk-module'
-          upstream_branch: 'main'
-          target_branch: 'main'
-          git_pull_args: '--rebase'
-
-      # 2. 比对是否有新提交，没有新提交则不触发编译
-      - name: Check for upstream updates
+      # 1. 纯原生 Git：拉取上游仓库并判断是否有新提交
+      - name: Fetch and check upstream updates
         id: check_updates
         run: |
-          # 手动点击触发或 workflow_call 时，强制执行编译
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 添加上游源并 fetch
+          git remote add upstream https://github.com/j-hc/revanced-magisk-module.git
+          git fetch upstream main
+
+          # 判断触发条件
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "手动/调用触发，强制启动编译！"
+            echo "手动/调用触发，强行同步上游并启动编译！"
+            git merge upstream/main --rebase || git rebase --skip
+            git push origin main || true
           else
-            # 定时触发时，检查 HEAD 是否发生了改变
-            git fetch origin main
+            # 定时触发：比对本地与上游 HEAD 差异
             LOCAL_HASH=$(git rev-parse HEAD)
-            REMOTE_HASH=$(git rev-parse origin/main)
-            
-            if [ "$LOCAL_HASH" = "$REMOTE_HASH" ] && [ "${{ steps.sync.outputs.has_new_commits }}" != "true" ]; then
+            UPSTREAM_HASH=$(git rev-parse upstream/main)
+
+            if [ "$LOCAL_HASH" = "$UPSTREAM_HASH" ]; then
               echo "has_changes=false" >> $GITHUB_OUTPUT
               echo "上游没有新提交，跳过本次编译。"
             else
               echo "has_changes=true" >> $GITHUB_OUTPUT
-              echo "检测到上游有新提交，开始编译！"
+              echo "检测到上游有新提交，同步并开始编译！"
+              git merge upstream/main --rebase || git rebase --skip
+              git push origin main || true
             fi
           fi
 
