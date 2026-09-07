@@ -37,8 +37,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "手动/调用触发，强行同步上游并启动编译！"
-            git merge upstream/main --rebase || git rebase --skip
-            git push origin main || true
+            git rebase upstream/main || git rebase --abort
+            git push origin main --force-with-lease || true
           else
             # 定时触发：比对本地与上游 HEAD 差异
             LOCAL_HASH=$(git rev-parse HEAD)
@@ -50,8 +50,8 @@ jobs:
             else
               echo "has_changes=true" >> $GITHUB_OUTPUT
               echo "检测到上游有新提交，同步并开始编译！"
-              git merge upstream/main --rebase || git rebase --skip
-              git push origin main || true
+              git rebase upstream/main || git rebase --abort
+              git push origin main --force-with-lease || true
             fi
           fi
 
