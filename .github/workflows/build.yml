@@ -1,5 +1,7 @@
 name: Build Modules
 on:
+  schedule:
+    - cron: '0 18 * * *' # 每天北京时间 02:00 自动检查上游更新
   workflow_call:
     inputs:
       from_ci:
@@ -14,19 +16,53 @@ jobs:
     permissions: write-all
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-java@v5
-        with:
-          distribution: "zulu"
-          java-version: "21"
-
-      - name: Checkout
+      - name: Checkout local branch
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: true
 
+      # 1. 自动同步上游仓库 (j-hc/revanced-magisk-module)
+      - name: Sync upstream changes
+        id: sync
+        uses: aitemr/upstream-repo-sync@v1
+        with:
+          upstream_repository: 'j-hc/revanced-magisk-module'
+          upstream_branch: 'main'
+          target_branch: 'main'
+          git_pull_args: '--rebase'
+
+      # 2. 比对是否有新提交，没有新提交则不触发编译
+      - name: Check for upstream updates
+        id: check_updates
+        run: |
+          # 手动点击触发或 workflow_call 时，强制执行编译
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "手动/调用触发，强制启动编译！"
+          else
+            # 定时触发时，检查 HEAD 是否发生了改变
+            git fetch origin main
+            LOCAL_HASH=$(git rev-parse HEAD)
+            REMOTE_HASH=$(git rev-parse origin/main)
+            
+            if [ "$LOCAL_HASH" = "$REMOTE_HASH" ] && [ "${{ steps.sync.outputs.has_new_commits }}" != "true" ]; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "上游没有新提交，跳过本次编译。"
+            else
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "检测到上游有新提交，开始编译！"
+            fi
+          fi
+
+      - uses: actions/setup-java@v5
+        if: steps.check_updates.outputs.has_changes == 'true'
+        with:
+          distribution: "zulu"
+          java-version: "21"
+
       - name: Update config
-        if: ${{ inputs.from_ci }}
+        if: steps.check_updates.outputs.has_changes == 'true' && inputs.from_ci
         run: |
           if git checkout origin/update build.md; then
             UPDATE_CFG=$(./build.sh config.toml --config-update)
@@ -36,6 +72,7 @@ jobs:
           fi
 
       - name: Get next version code
+        if: steps.check_updates.outputs.has_changes == 'true'
         id: next_ver_code
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,6 +82,7 @@ jobs:
           echo "NEXT_VER_CODE=$((TAG + 1))" >> $GITHUB_OUTPUT
 
       - name: Build modules/APKs
+        if: steps.check_updates.outputs.has_changes == 'true'
         run: if [ -f "config.json" ]; then ./build.sh config.json; else ./build.sh config.toml; fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,6 +90,7 @@ jobs:
           NEXT_VER_CODE: ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}
 
       - name: Get output
+        if: steps.check_updates.outputs.has_changes == 'true'
         id: get_output
         run: |
           DELIM="$(openssl rand -hex 8)"
@@ -59,8 +98,9 @@ jobs:
           cat build.md >> "$GITHUB_OUTPUT"
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
           cp -f build.md build.tmp
-      
+        
       - name: Upload release
+        if: steps.check_updates.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}
@@ -74,6 +114,7 @@ jobs:
           fi
 
       - name: Update modules changelog and update json
+        if: steps.check_updates.outputs.has_changes == 'true'
         id: update_config
         run: |
           git checkout -f update || git switch --discard-changes --orphan update
@@ -103,12 +144,13 @@ jobs:
           find . -name "*-update.json" | grep . || : >dummy-update.json
 
       - name: Commit module json changes
+        if: steps.check_updates.outputs.has_changes == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      
+        
           git add build.md *-update.json
-      
+        
           if ! git diff --cached --quiet; then
             git commit -m "Bump version ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}"
             git push origin HEAD:update
@@ -117,9 +159,9 @@ jobs:
           fi
 
       - name: Report to Telegram
+        if: steps.check_updates.outputs.has_changes == 'true' && env.TG_TOKEN != null
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
-        if: env.TG_TOKEN != null
         run: |
           cd build || { echo "build folder not found"; exit 1; }
 
